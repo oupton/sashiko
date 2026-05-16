@@ -2076,7 +2076,7 @@ impl Reviewer {
                     };
                     let final_subject = format!("{}{}", subject_prefix, patch_subject);
                     let final_body = format!(
-                        "{}\nReviewed-by: Sashiko <sashiko-bot@kernel.org>\n",
+                        "{}\nSashiko has reviewed this patch and found no issues. It looks great!\n",
                         body_head
                     );
 
