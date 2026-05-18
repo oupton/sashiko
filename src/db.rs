@@ -2280,10 +2280,10 @@ impl Database {
              LEFT JOIN subsystems s ON ps.subsystem_id = s.id
              LEFT JOIN (
                 SELECT r.patchset_id,
-                    SUM(CASE WHEN f.severity = 1 THEN 1 ELSE 0 END) as low,
-                    SUM(CASE WHEN f.severity = 2 THEN 1 ELSE 0 END) as medium,
-                    SUM(CASE WHEN f.severity = 3 THEN 1 ELSE 0 END) as high,
-                    SUM(CASE WHEN f.severity = 4 THEN 1 ELSE 0 END) as critical
+                    SUM(CASE WHEN f.severity = 1 AND COALESCE(f.preexisting, 0) = 0 THEN 1 ELSE 0 END) as low,
+                    SUM(CASE WHEN f.severity = 2 AND COALESCE(f.preexisting, 0) = 0 THEN 1 ELSE 0 END) as medium,
+                    SUM(CASE WHEN f.severity = 3 AND COALESCE(f.preexisting, 0) = 0 THEN 1 ELSE 0 END) as high,
+                    SUM(CASE WHEN f.severity = 4 AND COALESCE(f.preexisting, 0) = 0 THEN 1 ELSE 0 END) as critical
                 FROM reviews r
                 JOIN findings f ON r.id = f.review_id
                 WHERE r.status = 'Reviewed'
