@@ -807,6 +807,28 @@ impl Database {
         Ok(())
     }
 
+    pub async fn update_tool_usage_length(
+        &self,
+        review_id: i64,
+        tool_name: &str,
+        arguments: &str,
+        output_length: usize,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE tool_usages 
+                 SET output_length = ? 
+                 WHERE id = (
+                     SELECT id FROM tool_usages 
+                     WHERE review_id = ? AND tool_name = ? AND arguments = ? AND output_length = 0
+                     ORDER BY id DESC LIMIT 1
+                 )",
+                libsql::params![output_length as i64, review_id, tool_name, arguments],
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn migrate_tool_usages(&self) -> Result<()> {
         // 1. Check if we have logs to parse
         info!("Migration: Checking for tool usages to backfill...");
@@ -5483,5 +5505,55 @@ mod tests {
             .unwrap();
         let found_b = psets_b.iter().any(|p| p.id == ps_b);
         assert!(!found_b);
+    }
+
+    #[tokio::test]
+    async fn test_tool_usages_telemetry() {
+        let db = setup_db().await;
+
+        let thread_id = db.create_thread("root", "Test Thread", 1000).await.unwrap();
+        db.create_message(
+            "msg1", thread_id, None, "Author", "Subject", 1000, "", "", "", None, None,
+        )
+        .await
+        .unwrap();
+        let ps_id = db
+            .create_patchset(
+                thread_id, None, "msg1", "Subject", "Author", 1000, 1, 1, "", "", None, 1, None,
+                true, None, None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let review_id = db
+            .create_review(ps_id, None, "gemini", "test-model", None, None)
+            .await
+            .unwrap();
+
+        db.create_tool_usage(ToolUsage {
+            review_id,
+            provider: "test_prov".to_string(),
+            model: "test_model".to_string(),
+            tool_name: "git_grep".to_string(),
+            arguments: Some("{\"pattern\":\"gup_fast\"}".to_string()),
+            output_length: 0,
+        })
+        .await
+        .unwrap();
+
+        db.update_tool_usage_length(review_id, "git_grep", "{\"pattern\":\"gup_fast\"}", 456)
+            .await
+            .unwrap();
+
+        let stmt = db
+            .conn
+            .prepare("SELECT output_length FROM tool_usages WHERE review_id = ?")
+            .await
+            .unwrap();
+        let mut rows = stmt.query(libsql::params![review_id]).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let length: i64 = row.get(0).unwrap();
+        assert_eq!(length, 456);
     }
 }

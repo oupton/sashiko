@@ -1643,6 +1643,36 @@ async fn run_review_tool(
                                     && let Ok(req) =
                                         serde_json::from_value::<AiRequest>(payload_val.clone())
                                 {
+                                    // Update tool usages telemetry with actual output lengths from incoming tool response messages.
+                                    let mut tool_calls_map = std::collections::HashMap::new();
+                                    for msg in &req.messages {
+                                        if let Some(ref calls) = msg.tool_calls {
+                                            for call in calls {
+                                                tool_calls_map.insert(
+                                                    call.id.clone(),
+                                                    (call.function_name.clone(), call.arguments.to_string()),
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    for msg in &req.messages {
+                                        if msg.role == crate::ai::AiRole::Tool
+                                            && let Some(ref tool_call_id) = msg.tool_call_id
+                                            && let Some((tool_name, arguments)) = tool_calls_map.get(tool_call_id)
+                                            && let Some(ref content) = msg.content
+                                        {
+                                            let _ = db
+                                                .update_tool_usage_length(
+                                                    review_id,
+                                                    tool_name,
+                                                    arguments,
+                                                    content.len(),
+                                                )
+                                                .await;
+                                        }
+                                    }
+
                                     turn_count += 1;
                                     if settings.ai.log_turns {
                                         let n_msgs = req.messages.len();
