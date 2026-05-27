@@ -369,7 +369,29 @@ async fn main() -> Result<()> {
                         let prompts_dir = PathBuf::from("third_party/prompts/kernel");
                         let prompts_tool_path = Some(prompts_dir.join("tool.md"));
 
-                        let tools = ToolBox::new(worktree.path.clone(), prompts_tool_path);
+                        let mut patch_files = Vec::new();
+                        for p in &patches_to_review {
+                            if let Some(sha) = patch_shas.get(&p.index) {
+                                let mut git_cmd = std::process::Command::new("git");
+                                git_cmd.current_dir(&worktree.path)
+                                    .args(["diff-tree", "--no-commit-id", "--name-only", "-r", sha]);
+                                if let Ok(out) = git_cmd.output()
+                                    && out.status.success()
+                                {
+                                    let file_list = String::from_utf8_lossy(&out.stdout);
+                                    for file in file_list.lines() {
+                                        let trimmed = file.trim().to_string();
+                                        if !trimmed.is_empty() {
+                                            patch_files.push(trimmed);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        info!("Active patch files gathered: {:?}", patch_files);
+
+                        let mut tools = ToolBox::new(worktree.path.clone(), prompts_tool_path);
+                        tools.set_active_patch_files(patch_files);
                         let prompts = PromptRegistry::new(args.prompts.clone());
 
                         // Calculate series range (baseline..last_patch)

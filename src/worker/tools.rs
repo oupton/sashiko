@@ -24,6 +24,7 @@ use tokio::process::Command;
 pub struct ToolBox {
     worktree_path: PathBuf,
     prompts_path: Option<PathBuf>,
+    active_patch_files: Vec<String>,
 }
 
 impl ToolBox {
@@ -31,7 +32,12 @@ impl ToolBox {
         Self {
             worktree_path,
             prompts_path,
+            active_patch_files: Vec::new(),
         }
+    }
+
+    pub fn set_active_patch_files(&mut self, files: Vec<String>) {
+        self.active_patch_files = files;
     }
 
     pub fn get_worktree_path(&self) -> &Path {
@@ -152,8 +158,9 @@ impl ToolBox {
                     "properties": {
                         "revision": { "type": "string", "description": "The Git commit SHA or reference to search at." },
                         "pattern": { "type": "string", "description": "Regex pattern to search for." },
-                        "path": { "type": "string", "description": "Relative path directory or file to limit the search (optional)." },
-                        "context_lines": { "type": "integer", "description": "Number of context lines to show (default 0)." }
+                        "path": { "type": "string", "description": "Space-separated list of relative path prefixes or patterns to restrict the search (optional). Supports Git pathspec syntax, e.g. 'fs/' to include, ':!drivers/' to exclude." },
+                        "context_lines": { "type": "integer", "description": "Number of context lines to show (default 0)." },
+                        "count_only": { "type": "boolean", "description": "If true, returns only the list of files and the count of matches in each file, without the actual line content. Highly recommended for cheap broad searches." }
                     },
                     "required": ["revision", "pattern"]
                 }),
@@ -600,26 +607,34 @@ impl ToolBox {
             .ok_or_else(|| anyhow!("Missing pattern"))?;
         let path_str = args["path"].as_str();
         let context_lines = args["context_lines"].as_u64().unwrap_or(0) as usize;
+        let count_only = args["count_only"].as_bool().unwrap_or(false);
 
         if revision.starts_with('-') || pattern.starts_with('-') {
             return Err(anyhow!("Invalid revision or pattern"));
         }
 
         let mut cmd = Command::new("git");
-        cmd.current_dir(&self.worktree_path)
-            .arg("grep")
-            .arg("-n")
-            .arg("-I")
-            .arg("-P")
-            .arg(format!("-C{}", context_lines))
-            .arg(pattern)
-            .arg(revision);
+        cmd.current_dir(&self.worktree_path).arg("grep");
+
+        if count_only {
+            cmd.arg("-c");
+        } else {
+            cmd.arg("-n")
+                .arg("-I")
+                .arg("-P")
+                .arg(format!("-C{}", context_lines));
+        }
+
+        cmd.arg(pattern).arg(revision);
 
         if let Some(p) = path_str
             && p != "."
             && !p.is_empty()
         {
-            cmd.arg("--").arg(p);
+            cmd.arg("--");
+            for pathspec in p.split_whitespace() {
+                cmd.arg(pathspec);
+            }
         }
 
         let output = cmd.output().await?;
@@ -632,7 +647,23 @@ impl ToolBox {
         }
 
         let content = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(json!({ "content": self.truncate_output(content) }))
+        let formatted = if count_only {
+            let prefix = format!("{}:", revision);
+            content
+                .lines()
+                .map(|line| {
+                    if line.starts_with(&prefix) {
+                        &line[prefix.len()..]
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            format_git_grep_output(&content, revision, &self.active_patch_files)
+        };
+        Ok(json!({ "content": self.truncate_output(formatted) }))
     }
 
     async fn find_files(&self, args: Value) -> Result<Value> {
@@ -750,6 +781,114 @@ fn glob_to_regex(glob: &str) -> Result<regex::Regex> {
         .map_err(|e| anyhow::anyhow!("Invalid glob converted to regex: {}", e))
 }
 
+fn get_grep_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"^(.+?)(:|-)([0-9]+)(:|-)(.*)$").unwrap())
+}
+
+fn format_git_grep_output(stdout: &str, revision: &str, active_files: &[String]) -> String {
+    let prefix = format!("{}:", revision);
+    let re = get_grep_regex();
+
+    use std::collections::BTreeMap;
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut current_file: Option<String> = None;
+
+    for line in stdout.lines() {
+        if line == "--" {
+            if let Some(ref cur) = current_file
+                && let Some(list) = grouped.get_mut(cur)
+            {
+                list.push("  --".to_string());
+            }
+            continue;
+        }
+
+        let stripped = if line.starts_with(&prefix) {
+            &line[prefix.len()..]
+        } else {
+            line
+        };
+
+        if let Some(caps) = re.captures(stripped) {
+            let path = &caps[1];
+            let sep1 = &caps[2];
+            let line_num = &caps[3];
+            let sep2 = &caps[4];
+            let content = &caps[5];
+
+            if sep1 == sep2 {
+                let formatted_line = format!("  {}{}{}", line_num, sep1, content);
+                let path_str = path.to_string();
+                current_file = Some(path_str.clone());
+                grouped.entry(path_str).or_default().push(formatted_line);
+            } else if let Some(ref cur) = current_file {
+                grouped
+                    .entry(cur.clone())
+                    .or_default()
+                    .push(stripped.to_string());
+            }
+        } else if let Some(ref cur) = current_file {
+            grouped
+                .entry(cur.clone())
+                .or_default()
+                .push(stripped.to_string());
+        }
+    }
+
+    // Proximity Ranking
+    let mut blocks: Vec<(String, Vec<String>)> = grouped.into_iter().collect();
+    blocks.sort_by_key(|(path, _)| (get_priority_score(path, active_files), path.clone()));
+
+    let mut result = String::new();
+    for (path, lines) in blocks {
+        result.push_str(&format!("[file: {}]\n", path));
+        for l in lines {
+            result.push_str(&l);
+            result.push('\n');
+        }
+        result.push('\n');
+    }
+
+    result.trim_end().to_string()
+}
+
+fn get_priority_score(path: &str, active_files: &[String]) -> u32 {
+    if active_files.is_empty() {
+        return 4;
+    }
+
+    // 1. Exact Match
+    if active_files.iter().any(|f| f == path) {
+        return 1;
+    }
+
+    // 2. Directory Prefix Match
+    let path_parent = std::path::Path::new(path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if !path_parent.is_empty() {
+        for active_file in active_files {
+            let active_parent = std::path::Path::new(active_file)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !active_parent.is_empty() && path_parent == active_parent {
+                return 2;
+            }
+        }
+    }
+
+    // 3. Include Directory Match
+    if path.starts_with("include/") {
+        return 3;
+    }
+
+    // 4. Default
+    4
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,6 +963,45 @@ mod tests {
         assert!(content.contains("2-    println!(\"Hello World\");"));
         assert!(content.contains("3:    // TODO: fix this"));
         assert!(content.contains("4-}"));
+
+        // Test pathspec exclusion
+        let ignored_file_path = repo_path.join("ignored.rs");
+        let mut ignored_file = File::create(&ignored_file_path)?;
+        writeln!(ignored_file, "// TODO: do not find this")?;
+
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["add", "."])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["commit", "-m", "Add ignored file"])
+            .output()
+            .await?;
+
+        let args_excl = json!({
+            "revision": "HEAD",
+            "pattern": "TODO",
+            "path": ". :!ignored.rs"
+        });
+        let result = toolbox.call("git_grep", args_excl).await?;
+        let content = result["content"].as_str().unwrap();
+
+        assert!(content.contains("test.rs"));
+        assert!(!content.contains("ignored.rs"));
+
+        // Test count_only mode
+        let args_count = json!({
+            "revision": "HEAD",
+            "pattern": "TODO",
+            "count_only": true
+        });
+        let result = toolbox.call("git_grep", args_count).await?;
+        let content = result["content"].as_str().unwrap();
+
+        assert!(content.contains("test.rs:1"));
+        assert!(content.contains("ignored.rs:1"));
 
         Ok(())
     }
@@ -1061,5 +1239,60 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_format_git_grep_output() {
+        let input = "\
+HEAD:drivers/gpu/drm/tegra/output.c-167-\tif (ddc) {
+HEAD:drivers/gpu/drm/tegra/output.c:168:\t\toutput->ddc = of_find_i2c_adapter_by_node(ddc);
+HEAD:drivers/gpu/drm/tegra/output.c-169-\t\tif (!output->ddc) {
+--
+HEAD:drivers/i2c/muxes/i2c-mux-gpio.c:80:\tadapter = of_find_i2c_adapter_by_node(adapter_np);
+";
+
+        let expected = "\
+[file: drivers/gpu/drm/tegra/output.c]
+  167-	if (ddc) {
+  168:\t\toutput->ddc = of_find_i2c_adapter_by_node(ddc);
+  169-\t\tif (!output->ddc) {
+  --
+
+[file: drivers/i2c/muxes/i2c-mux-gpio.c]
+  80:\tadapter = of_find_i2c_adapter_by_node(adapter_np);";
+
+        let formatted = super::format_git_grep_output(input, "HEAD", &[]);
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn test_format_git_grep_output_with_proximity() {
+        let input = "\
+HEAD:block/blk-core.c:10:foo
+HEAD:drivers/soc/tegra/pmc.c:20:foo
+HEAD:include/linux/i2c.h:30:foo
+HEAD:io_uring/io_uring.c:40:foo
+HEAD:io_uring/rw.c:50:foo
+";
+        let active_files = vec!["io_uring/rw.c".to_string()];
+
+        let expected = "\
+[file: io_uring/rw.c]
+  50:foo
+
+[file: io_uring/io_uring.c]
+  40:foo
+
+[file: include/linux/i2c.h]
+  30:foo
+
+[file: block/blk-core.c]
+  10:foo
+
+[file: drivers/soc/tegra/pmc.c]
+  20:foo";
+
+        let formatted = super::format_git_grep_output(input, "HEAD", &active_files);
+        assert_eq!(formatted, expected);
     }
 }
