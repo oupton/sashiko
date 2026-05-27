@@ -200,12 +200,100 @@ impl ToolBox {
         decls
     }
 
+    fn normalize_tool_args(name: &str, args: &Value) -> Value {
+        let mut normalized = args.clone();
+        let name_normalized = name.trim().to_lowercase();
+        if let Some(obj) = normalized.as_object_mut() {
+            match name_normalized.as_str() {
+                "git_read_files" => {
+                    if !obj.contains_key("mode") {
+                        obj.insert("mode".to_string(), json!("raw"));
+                    }
+                    if let Some(files) = obj.get_mut("files").and_then(|f| f.as_array_mut()) {
+                        for file in files {
+                            if let Some(f_obj) = file.as_object_mut() {
+                                if !f_obj.contains_key("start_line") {
+                                    f_obj.insert("start_line".to_string(), Value::Null);
+                                }
+                                if !f_obj.contains_key("end_line") {
+                                    f_obj.insert("end_line".to_string(), Value::Null);
+                                }
+                            }
+                        }
+                    }
+                }
+                "git_blame" => {
+                    if !obj.contains_key("start_line") {
+                        obj.insert("start_line".to_string(), Value::Null);
+                    }
+                    if !obj.contains_key("end_line") {
+                        obj.insert("end_line".to_string(), Value::Null);
+                    }
+                }
+                "git_diff" => {
+                    if !obj.contains_key("paths") {
+                        obj.insert("paths".to_string(), Value::Null);
+                    }
+                }
+                "git_show" => {
+                    if !obj.contains_key("suppress_diff") {
+                        obj.insert("suppress_diff".to_string(), json!(false));
+                    }
+                    if !obj.contains_key("start_line") {
+                        obj.insert("start_line".to_string(), Value::Null);
+                    }
+                    if !obj.contains_key("end_line") {
+                        obj.insert("end_line".to_string(), Value::Null);
+                    }
+                    if !obj.contains_key("paths") {
+                        obj.insert("paths".to_string(), Value::Null);
+                    }
+                    if !obj.contains_key("mode") {
+                        obj.insert("mode".to_string(), json!("raw"));
+                    }
+                }
+                "git_log" => {
+                    if !obj.contains_key("limit") {
+                        obj.insert("limit".to_string(), json!(10));
+                    }
+                }
+                "git_grep" => {
+                    if !obj.contains_key("path") {
+                        obj.insert("path".to_string(), Value::Null);
+                    }
+                    if !obj.contains_key("context_lines") {
+                        obj.insert("context_lines".to_string(), json!(0));
+                    }
+                    if !obj.contains_key("count_only") {
+                        obj.insert("count_only".to_string(), json!(false));
+                    }
+                    if !obj.contains_key("is_literal") {
+                        obj.insert("is_literal".to_string(), json!(false));
+                    }
+                }
+                "git_find_files" => {
+                    if !obj.contains_key("path") {
+                        obj.insert("path".to_string(), Value::Null);
+                    }
+                }
+                _ => {}
+            }
+        }
+        normalized
+    }
+
     pub async fn call(&self, name: &str, args: Value) -> Result<Value> {
         let name_normalized = name.trim().to_lowercase();
         let should_cache = name_normalized != "todowrite";
 
+        let normalized_args = Self::normalize_tool_args(&name_normalized, &args);
+
         let key = if should_cache {
-            let k = format!("{}:{}", name_normalized, serde_json::to_string(&args)?);
+            let k = format!(
+                "{}:{}",
+                name_normalized,
+                serde_json::to_string(&normalized_args)?
+            );
             {
                 let cache = self.cache.read().unwrap();
                 if let Some(val) = cache.get(&k) {
@@ -1454,6 +1542,77 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_toolbox_caching_normalization() -> Result<()> {
+        let dir = tempdir()?;
+        let repo_path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["init"])
+            .output()
+            .await?;
+
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["config", "user.email", "test@example.com"])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["config", "user.name", "Test User"])
+            .output()
+            .await?;
+
+        let file_path = repo_path.join("grep_test.txt");
+        std::fs::write(&file_path, "search target")?;
+
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["add", "."])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["commit", "-m", "Initial"])
+            .output()
+            .await?;
+
+        let toolbox = ToolBox::new(repo_path.clone(), None);
+
+        // Call 1: omit optional parameter count_only and is_literal
+        let args1 = json!({
+            "revision": "HEAD",
+            "pattern": "search target"
+        });
+
+        let _ = toolbox.call("git_grep", args1).await?;
+        {
+            let cache = toolbox.cache.read().unwrap();
+            assert_eq!(cache.len(), 1);
+        }
+
+        // Remove the file physically so if it hits git, it will fail
+        std::fs::remove_file(&file_path)?;
+
+        // Call 2: include optional parameter explicitly set to default value
+        let args2 = json!({
+            "revision": "HEAD",
+            "pattern": "search target",
+            "count_only": false,
+            "is_literal": false
+        });
+
+        let result = toolbox.call("git_grep", args2).await?;
+        // It should successfully hit the cache and return the result (which contains search target)
+        let content = result["content"].as_str().unwrap();
+        assert!(content.contains("search target"));
+
+        Ok(())
+    }
+
+
 
     #[tokio::test]
     async fn test_tool_normalization() -> Result<()> {
