@@ -42,7 +42,7 @@ impl ToolBox {
     pub fn get_declarations_generic(&self) -> Vec<AiTool> {
         let mut decls = vec![
             AiTool {
-                name: "read_files".to_string(),
+                name: "git_read_files".to_string(),
                 description: "Read the content of one or more files at a specific Git revision. In 'smart' mode, it collapses irrelevant code around the focus lines."
                     .to_string(),
                 parameters: json!({
@@ -51,7 +51,7 @@ impl ToolBox {
                         "revision": { "type": "string", "description": "The Git commit SHA or reference (e.g., HEAD, baseline SHA, or target commit SHA) to read from." },
                         "files": {
                             "type": "array",
-                            "description": "List of files to read.",
+                            "description": "List of files to read (maximum 10 files per request).",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -90,7 +90,12 @@ impl ToolBox {
                     "type": "object",
                     "properties": {
                         "base_revision": { "type": "string", "description": "The baseline commit SHA or revision reference." },
-                        "target_revision": { "type": "string", "description": "The target commit SHA or revision reference to compare against." }
+                        "target_revision": { "type": "string", "description": "The target commit SHA or revision reference to compare against." },
+                        "paths": {
+                            "type": "array",
+                            "description": "Optional relative file or directory paths to filter the diff (e.g. ['fs/', 'drivers/net/']).",
+                            "items": { "type": "string" }
+                        }
                     },
                     "required": ["base_revision", "target_revision"]
                 }),
@@ -105,7 +110,12 @@ impl ToolBox {
                             "object": { "type": "string", "description": "The object to show (e.g. 'HEAD:README.md' or 'HEAD')." },
                             "suppress_diff": { "type": "boolean", "description": "If true, suppresses the diff output for commits (shows only metadata). Useful for checking commit details cheaply." },
                             "start_line": { "type": "integer", "description": "1-based start line (optional). Useful for reading specific parts of a file (blob)." },
-                            "end_line": { "type": "integer", "description": "1-based end line (optional)." }
+                            "end_line": { "type": "integer", "description": "1-based end line (optional)." },
+                            "paths": {
+                                "type": "array",
+                                "description": "Optional relative file or directory paths to filter the show output (only applicable to commits) (e.g. ['fs/', 'kernel/']).",
+                                "items": { "type": "string" }
+                            }
                         },
                         "required": ["object"]
                 }),
@@ -123,7 +133,7 @@ impl ToolBox {
                 }),
             },
             AiTool {
-                name: "list_dir".to_string(),
+                name: "git_ls".to_string(),
                 description: "List files in a directory at a specific Git revision.".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -135,7 +145,7 @@ impl ToolBox {
                 }),
             },
             AiTool {
-                name: "search_file_content".to_string(),
+                name: "git_grep".to_string(),
                 description: "Search for a pattern in files using git grep at a specific Git revision. Returns matching lines with context.".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -149,13 +159,14 @@ impl ToolBox {
                 }),
             },
             AiTool {
-                name: "find_files".to_string(),
+                name: "git_find_files".to_string(),
                 description: "Find files matching a glob pattern in a specific Git revision.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "revision": { "type": "string", "description": "The Git commit SHA or reference to search in." },
-                        "pattern": { "type": "string", "description": "Glob pattern to match (e.g., '*.rs' or 'src/**/mod.rs')." }
+                        "pattern": { "type": "string", "description": "Glob pattern to match (e.g., '*.rs' or 'src/**/mod.rs')." },
+                        "path": { "type": "string", "description": "Optional relative path to restrict the search (e.g., 'drivers/net/')." }
                     },
                     "required": ["revision", "pattern"]
                 }),
@@ -183,22 +194,21 @@ impl ToolBox {
     pub async fn call(&self, name: &str, args: Value) -> Result<Value> {
         let name_normalized = name.trim().to_lowercase();
         match name_normalized.as_str() {
-            "read_files" => self.read_files(args).await,
+            "git_read_files" => self.read_files(args).await,
             "git_blame" => self.git_blame(args).await,
             "git_diff" => self.git_diff(args).await,
             "git_show" => self.git_show(args).await,
             "git_log" => self.git_log(args).await,
-            "list_dir" => self.list_dir(args).await,
-            "search_file_content" => self.search_file_content(args).await,
-            "find_files" => self.find_files(args).await,
-
+            "git_ls" => self.git_ls(args).await,
+            "git_grep" => self.git_grep(args).await,
+            "git_find_files" => self.find_files(args).await,
             "read_prompt" => self.read_prompt(args).await,
             _ => Err(anyhow!("Unknown tool: {}", name)),
         }
     }
 
     fn truncate_output(&self, output: String) -> String {
-        Truncator::truncate_diff(&output, 10_000)
+        Truncator::truncate_sequential(&output, 10_000)
     }
 
     async fn read_prompt(&self, args: Value) -> Result<Value> {
@@ -223,6 +233,11 @@ impl ToolBox {
         let files = args["files"]
             .as_array()
             .ok_or_else(|| anyhow!("Missing files"))?;
+        if files.len() > 10 {
+            return Err(anyhow!(
+                "Too many files requested. Maximum limit is 10 files per request."
+            ));
+        }
         let mode = args["mode"].as_str().unwrap_or("raw");
 
         let mut results = Vec::new();
@@ -384,11 +399,27 @@ impl ToolBox {
             return Err(anyhow!("Invalid revision names"));
         }
 
-        let output = Command::new("git")
-            .current_dir(&self.worktree_path)
-            .args(["diff", "--diff-algorithm=histogram", base, target])
-            .output()
-            .await?;
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&self.worktree_path).args([
+            "diff",
+            "--diff-algorithm=histogram",
+            base,
+            target,
+        ]);
+
+        if let Some(paths_val) = args["paths"].as_array() {
+            cmd.arg("--");
+            for p in paths_val {
+                if let Some(p_str) = p.as_str() {
+                    if p_str.starts_with('-') {
+                        return Err(anyhow!("Invalid path parameter: {}", p_str));
+                    }
+                    cmd.arg(p_str);
+                }
+            }
+        }
+
+        let output = cmd.output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -447,6 +478,18 @@ impl ToolBox {
 
         cmd.arg(object);
 
+        if let Some(paths_val) = args["paths"].as_array() {
+            cmd.arg("--");
+            for p in paths_val {
+                if let Some(p_str) = p.as_str() {
+                    if p_str.starts_with('-') {
+                        return Err(anyhow!("Invalid path parameter: {}", p_str));
+                    }
+                    cmd.arg(p_str);
+                }
+            }
+        }
+
         let output = cmd.output().await?;
 
         if !output.status.success() {
@@ -488,7 +531,7 @@ impl ToolBox {
         Ok(json!({ "content": self.truncate_output(content) }))
     }
 
-    async fn list_dir(&self, args: Value) -> Result<Value> {
+    async fn git_ls(&self, args: Value) -> Result<Value> {
         let revision = args["revision"]
             .as_str()
             .ok_or_else(|| anyhow!("Missing revision"))?;
@@ -535,14 +578,20 @@ impl ToolBox {
             }
         }
 
-        if entries.len() > 1000 {
+        let total_entries = entries.len();
+        let truncated = total_entries > 1000;
+        if truncated {
             entries.truncate(1000);
         }
 
-        Ok(json!({ "entries": entries }))
+        Ok(json!({
+            "entries": entries,
+            "truncated": truncated,
+            "total_entries": total_entries
+        }))
     }
 
-    async fn search_file_content(&self, args: Value) -> Result<Value> {
+    async fn git_grep(&self, args: Value) -> Result<Value> {
         let revision = args["revision"]
             .as_str()
             .ok_or_else(|| anyhow!("Missing revision"))?;
@@ -594,6 +643,8 @@ impl ToolBox {
             .as_str()
             .ok_or_else(|| anyhow!("Missing pattern"))?;
 
+        let path_str = args["path"].as_str();
+
         if revision.starts_with('-') {
             return Err(anyhow!("Invalid revision"));
         }
@@ -601,6 +652,16 @@ impl ToolBox {
         let mut cmd = Command::new("git");
         cmd.current_dir(&self.worktree_path)
             .args(["ls-tree", "-r", "--name-only", revision]);
+
+        if let Some(p) = path_str
+            && p != "."
+            && !p.is_empty()
+        {
+            if p.starts_with('-') {
+                return Err(anyhow!("Invalid path parameter"));
+            }
+            cmd.arg("--").arg(p);
+        }
 
         let output = cmd.output().await?;
         if !output.status.success() {
@@ -697,7 +758,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn test_search_file_content() -> Result<()> {
+    async fn test_git_grep() -> Result<()> {
         let dir = tempdir()?;
         let repo_path = dir.path().to_path_buf();
 
@@ -745,7 +806,7 @@ mod tests {
             "pattern": "println",
             "path": "."
         });
-        let result = toolbox.call("search_file_content", args).await?;
+        let result = toolbox.call("git_grep", args).await?;
         let content = result["content"].as_str().unwrap();
 
         assert!(content.contains("test.rs"));
@@ -757,7 +818,7 @@ mod tests {
             "pattern": "TODO",
             "context_lines": 1
         });
-        let result = toolbox.call("search_file_content", args).await?;
+        let result = toolbox.call("git_grep", args).await?;
         let content = result["content"].as_str().unwrap();
 
         assert!(content.contains("2-    println!(\"Hello World\");"));
@@ -834,7 +895,7 @@ mod tests {
         // Test read_files
         let result = toolbox
             .call(
-                "read_files",
+                "git_read_files",
                 json!({
                     "revision": "HEAD",
                     "files": [{"path": "test.txt"}]

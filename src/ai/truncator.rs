@@ -85,6 +85,55 @@ impl Truncator {
         result
     }
 
+    /// Sequentially truncates content, keeping only the first N lines/tokens.
+    /// Appends a truncation warning.
+    pub fn truncate_sequential(content: &str, max_tokens: usize) -> String {
+        let estimated = TokenBudget::estimate_tokens(content);
+        if estimated <= max_tokens {
+            return content.to_string();
+        }
+
+        let max_chars = max_tokens * 4;
+        let lines: Vec<&str> = content.lines().collect();
+        let total_lines = lines.len();
+
+        let allowed_lines = max_chars / 50;
+
+        if total_lines <= allowed_lines {
+            // Long line fallback
+            let kept: String = content.chars().take(max_chars).collect();
+            return format!(
+                "{}\n... [Output truncated. Content too large ({} tokens). Displaying first {} chars] ...\n",
+                kept, estimated, max_chars
+            );
+        }
+
+        // Keep only the top lines
+        let keep = allowed_lines;
+        let mut result = String::new();
+        for line in &lines[..keep] {
+            result.push_str(line);
+            result.push('\n');
+        }
+
+        result.push_str(&format!(
+            "\n... [Output truncated. Dropped {} lines. Original size: {} tokens] ...\n",
+            total_lines - keep,
+            estimated
+        ));
+
+        // Final Safety Check
+        if TokenBudget::estimate_tokens(&result) > max_tokens {
+            let kept: String = result.chars().take(max_chars).collect();
+            return format!(
+                "{}\n... [Output truncated after line filtering. Original size: {} tokens] ...\n",
+                kept, estimated
+            );
+        }
+
+        result
+    }
+
     /// Smart truncation for code files.
     /// tries to preserve context around `focus_lines`.
     ///
@@ -202,5 +251,17 @@ mod tests {
         assert!(truncated.len() < 300);
         assert!(truncated.contains("Output truncated"));
         assert!(truncated.starts_with("aaaa"));
+    }
+
+    #[test]
+    fn test_truncate_sequential() {
+        let content = (0..100)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let truncated = Truncator::truncate_sequential(&content, 50);
+        assert!(truncated.contains("line 0"));
+        assert!(truncated.contains("Output truncated. Dropped"));
+        assert!(!truncated.contains("line 99"));
     }
 }

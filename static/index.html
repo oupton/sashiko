@@ -2464,7 +2464,7 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
         function getToolPreview(name, args) {
             try {
                 switch (name) {
-                    case 'read_files': {
+                    case 'git_read_files': {
                         const files = args.files || [];
                         const mode = args.mode || 'raw';
                         const fileStrs = files.map(f => {
@@ -2496,19 +2496,19 @@ ${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data
                         }
                         return s;
                     }
-                    case 'list_dir':
+                    case 'git_ls':
                         return `"${args.path}"`;
                     case 'write_file': {
                         const contentLen = (args.content || '').length;
                         return `"${args.path}", ${formatSize(contentLen)} content`;
                     }
-                    case 'search_file_content': {
+                    case 'git_grep': {
                         let s = `"${args.pattern}"`;
                         if (args.path && args.path !== '.') s += ` in "${args.path}"`;
                         if (args.context_lines) s += ` ±${args.context_lines}`;
                         return s;
                     }
-                    case 'find_files': {
+                    case 'git_find_files': {
                         let s = `"${args.pattern}"`;
                         if (args.path && args.path !== '.') s += ` in "${args.path}"`;
                         return s;

@@ -28,13 +28,13 @@ mod tests {
     }
 
     #[test]
-    fn test_list_dir_linux() {
+    fn test_git_ls_linux() {
         let (linux_path, _prompts_path) = get_test_paths();
         let toolbox = ToolBox::new(linux_path, None);
         let rt = Runtime::new().unwrap();
 
         let args = json!({ "revision": "HEAD", "path": "." });
-        let result = rt.block_on(toolbox.call("list_dir", args)).unwrap();
+        let result = rt.block_on(toolbox.call("git_ls", args)).unwrap();
         let entries = result["entries"].as_array().unwrap();
 
         assert!(entries.iter().any(|e| e["name"] == "README.md"));
@@ -53,7 +53,7 @@ mod tests {
                 { "path": "README.md", "start_line": 1, "end_line": 5 }
             ]
         });
-        let result = rt.block_on(toolbox.call("read_files", args)).unwrap();
+        let result = rt.block_on(toolbox.call("git_read_files", args)).unwrap();
         let results = result["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
 
@@ -108,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_file_content_relative_path() {
+    fn test_git_grep_relative_path() {
         let (linux_path, _prompts_path) = get_test_paths();
         let toolbox = ToolBox::new(linux_path, None);
         let rt = Runtime::new().unwrap();
@@ -120,9 +120,7 @@ mod tests {
             "path": "README.md"
         });
 
-        let result = rt
-            .block_on(toolbox.call("search_file_content", args))
-            .unwrap();
+        let result = rt.block_on(toolbox.call("git_grep", args)).unwrap();
         let content = result["content"].as_str().unwrap();
 
         assert!(!content.is_empty());
