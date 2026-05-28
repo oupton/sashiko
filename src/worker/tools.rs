@@ -328,9 +328,24 @@ impl ToolBox {
             };
 
             let truncated = Truncator::truncate_code(&content, focus, 20_000);
+            let is_truncated = total_lines > 0 && truncated.contains("lines collapsed");
 
             return Ok(json!({
                 "content": truncated,
+                "truncated": is_truncated,
+                "metadata": {
+                    "total_items": total_lines,
+                    "returned_items": total_lines,
+                    "start_index": start_line.unwrap_or(1),
+                    "end_index": end_line.unwrap_or(total_lines)
+                },
+                "next_page_hint": if is_truncated {
+                    Some("Code is partially collapsed/truncated around focus lines. Supply start_line/end_line to see other parts.".to_string())
+                } else {
+                    None
+                },
+
+                // Backwards compatibility
                 "total_lines": total_lines,
                 "mode": "smart"
             }));
@@ -347,19 +362,57 @@ impl ToolBox {
         let end = end.clamp(start, total_lines);
 
         if start >= total_lines {
-            return Ok(json!({ "content": "", "lines_read": 0, "total_lines": total_lines }));
+            return Ok(json!({
+                "content": "",
+                "truncated": false,
+                "metadata": {
+                    "total_items": total_lines,
+                    "returned_items": 0,
+                    "start_index": start + 1,
+                    "end_index": end
+                },
+                "lines_read": 0,
+                "total_lines": total_lines
+            }));
         }
 
         let slice = &lines[start..end];
         let result = slice.join("\n");
-        let truncated = self.truncate_output(result);
+        let truncated = self.truncate_output(result.clone());
+
+        let lines_read = slice.len();
+        let start_idx = start + 1;
+        let end_idx = end;
+        let is_truncated = lines_read < total_lines || truncated.len() < result.len();
+
+        let next_page_hint = if is_truncated {
+            Some(format!(
+                "Only lines {}-{} of {} are shown due to token limits. To read the remaining lines, call git_read_files with start_line={}.",
+                start_idx,
+                end_idx,
+                total_lines,
+                end_idx + 1
+            ))
+        } else {
+            None
+        };
 
         Ok(json!({
             "content": truncated,
-            "lines_read": slice.len(),
+            "truncated": is_truncated,
+            "metadata": {
+                "total_items": total_lines,
+                "returned_items": lines_read,
+                "start_index": start_idx,
+                "end_index": end_idx
+            },
+            "next_page_hint": next_page_hint,
+
+            // Backwards compatibility
+            "lines_read": lines_read,
             "total_lines": total_lines,
-            "start_line": start + 1,
-            "end_line": end
+            "start_line": start_idx,
+            "end_line": end_idx
         }))
     }
 
@@ -391,7 +444,26 @@ impl ToolBox {
         }
 
         let content = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(json!({ "content": self.truncate_output(content) }))
+        let total_blame_lines = content.lines().count();
+        let truncated_content = self.truncate_output(content);
+        let returned_blame_lines = truncated_content.lines().count();
+        let is_truncated = returned_blame_lines < total_blame_lines;
+
+        Ok(json!({
+            "content": truncated_content,
+            "truncated": is_truncated,
+            "metadata": {
+                "total_items": total_blame_lines,
+                "returned_items": returned_blame_lines,
+                "start_index": start_line.unwrap_or(1),
+                "end_index": start_line.unwrap_or(1) + returned_blame_lines as u64 - 1
+            },
+            "next_page_hint": if is_truncated {
+                Some(format!("Only the first {} lines of blame are shown. To view the remaining blame lines, use start_line={}.", returned_blame_lines, start_line.unwrap_or(1) + returned_blame_lines as u64))
+            } else {
+                None
+            }
+        }))
     }
 
     async fn git_diff(&self, args: Value) -> Result<Value> {
@@ -434,7 +506,24 @@ impl ToolBox {
         }
 
         let content = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(json!({ "content": Truncator::truncate_diff(&content, 10_000) }))
+        let total_diff_lines = content.lines().count();
+        let truncated_diff = Truncator::truncate_diff(&content, 10_000);
+        let returned_diff_lines = truncated_diff.lines().count();
+        let is_truncated = returned_diff_lines < total_diff_lines;
+
+        Ok(json!({
+            "content": truncated_diff,
+            "truncated": is_truncated,
+            "metadata": {
+                "total_items": total_diff_lines,
+                "returned_items": returned_diff_lines
+            },
+            "next_page_hint": if is_truncated {
+                Some("This diff is too large and was truncated by dropping the middle. To see complete changes, filter by specific 'paths' (e.g., folders/files).".to_string())
+            } else {
+                None
+            }
+        }))
     }
 
     async fn git_log(&self, args: Value) -> Result<Value> {
@@ -459,9 +548,28 @@ impl ToolBox {
             return Ok(json!({ "error": format!("git log failed: {}", stderr) }));
         }
 
-        Ok(
-            json!({ "output": self.truncate_output(String::from_utf8_lossy(&output.stdout).to_string()) }),
-        )
+        let raw_stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let total_log_lines = raw_stdout.lines().count();
+        let truncated_log = self.truncate_output(raw_stdout);
+        let returned_log_lines = truncated_log.lines().count();
+        let is_truncated = returned_log_lines < total_log_lines;
+
+        Ok(json!({
+            "content": truncated_log,
+            "truncated": is_truncated,
+            "metadata": {
+                "total_items": total_log_lines,
+                "returned_items": returned_log_lines
+            },
+            "next_page_hint": if is_truncated {
+                Some("The log output was truncated. Use a smaller commit range or set a lower 'limit' parameter.".to_string())
+            } else {
+                None
+            },
+
+            // Backwards compatibility
+            "output": truncated_log
+        }))
     }
 
     async fn git_show(&self, args: Value) -> Result<Value> {
@@ -508,12 +616,21 @@ impl ToolBox {
 
         let content = String::from_utf8_lossy(&output.stdout).to_string();
 
+        let is_file = object.contains(':') && !object.starts_with(':');
+
         if start_line.is_some() || end_line.is_some() {
             let lines: Vec<&str> = content.lines().collect();
             let total_lines = lines.len();
-            let (start, end) = match (start_line, end_line) {
+
+            // Default page limit of 100 lines if end_line is missing but start_line is present
+            let resolved_end_line = match (start_line, end_line) {
+                (Some(s), None) => Some(s + 100),
+                (_, e) => e,
+            };
+
+            let (start, end) = match (start_line, resolved_end_line) {
                 (Some(s), Some(e)) => (s.max(1) - 1, e.min(total_lines)),
-                (Some(s), None) => (s.max(1) - 1, total_lines),
+                (Some(s), None) => (s.max(1) - 1, total_lines), // Should not happen
                 (None, Some(e)) => (0, e.min(total_lines)),
                 (None, None) => (0, total_lines),
             };
@@ -522,20 +639,76 @@ impl ToolBox {
             let end = end.clamp(start, total_lines);
 
             if start >= total_lines {
-                return Ok(json!({ "content": "", "lines_read": 0, "total_lines": total_lines }));
+                return Ok(json!({
+                    "content": "",
+                    "truncated": false,
+                    "metadata": {
+                        "total_items": total_lines,
+                        "returned_items": 0,
+                        "start_index": start + 1,
+                        "end_index": end
+                    },
+                    "lines_read": 0,
+                    "total_lines": total_lines
+                }));
             }
 
             let slice = &lines[start..end];
             let result = slice.join("\n");
+
+            let truncated = if is_file {
+                Truncator::truncate_code(&result, None, 10_000)
+            } else {
+                Truncator::truncate_diff(&result, 10_000)
+            };
+
+            let is_truncated = slice.len() < total_lines || truncated.len() < result.len();
+
             return Ok(json!({
-                "content": self.truncate_output(result),
+                "content": truncated,
+                "truncated": is_truncated,
+                "metadata": {
+                    "total_items": total_lines,
+                    "returned_items": slice.len(),
+                    "start_index": start + 1,
+                    "end_index": end
+                },
+                "next_page_hint": if is_truncated {
+                    Some(format!("Only lines {}-{} of {} are shown. To read more, call git_show with start_line={}.", start + 1, end, total_lines, end + 1))
+                } else {
+                    None
+                },
+
+                // Backwards compatibility
                 "total_lines": total_lines,
                 "start_line": start + 1,
                 "end_line": end
             }));
         }
 
-        Ok(json!({ "content": self.truncate_output(content) }))
+        let truncated = if is_file {
+            Truncator::truncate_code(&content, None, 10_000)
+        } else {
+            Truncator::truncate_diff(&content, 10_000)
+        };
+
+        let total_lines = content.lines().count();
+        let returned_lines = truncated.lines().count();
+        let is_truncated = returned_lines < total_lines;
+
+        Ok(json!({
+            "content": truncated,
+            "truncated": is_truncated,
+            "metadata": {
+                "total_items": total_lines,
+                "returned_items": returned_lines
+            },
+            "next_page_hint": if is_truncated {
+                Some("This content was truncated due to token budget. Specify a start_line range to fetch the next slice.".to_string())
+            } else {
+                None
+            }
+        }))
     }
 
     async fn git_ls(&self, args: Value) -> Result<Value> {
@@ -641,7 +814,13 @@ impl ToolBox {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             if stderr.is_empty() {
-                return Ok(json!({ "matches": [], "message": "No matches found." }));
+                return Ok(json!({
+                    "content": "",
+                    "truncated": false,
+                    "metadata": { "total_items": 0, "returned_items": 0 },
+                    "matches": [],
+                    "message": "No matches found."
+                }));
             }
             return Ok(json!({ "error": format!("git grep failed: {}", stderr) }));
         }
@@ -663,7 +842,25 @@ impl ToolBox {
         } else {
             format_git_grep_output(&content, revision, &self.active_patch_files)
         };
-        Ok(json!({ "content": self.truncate_output(formatted) }))
+
+        let total_grep_lines = formatted.lines().count();
+        let truncated_grep = self.truncate_output(formatted);
+        let returned_grep_lines = truncated_grep.lines().count();
+        let is_truncated = returned_grep_lines < total_grep_lines;
+
+        Ok(json!({
+            "content": truncated_grep,
+            "truncated": is_truncated,
+            "metadata": {
+                "total_items": total_grep_lines,
+                "returned_items": returned_grep_lines
+            },
+            "next_page_hint": if is_truncated {
+                Some("Grep matches were truncated. Narrow your search using a pathspec or a more specific regex pattern.".to_string())
+            } else {
+                None
+            }
+        }))
     }
 
     async fn find_files(&self, args: Value) -> Result<Value> {
@@ -711,17 +908,31 @@ impl ToolBox {
             }
         }
 
-        if matched_files.len() > 1000 {
-            let truncated = matched_files[..1000].join("\n");
-            return Ok(json!({
-                 "files": truncated,
-                 "total_found": matched_files.len(),
-                 "message": "Output truncated to 1000 files."
-            }));
-        }
+        let total_found = matched_files.len();
+        let (truncated_files, is_truncated) = if total_found > 1000 {
+            (matched_files[..1000].join("\n"), true)
+        } else {
+            (matched_files.join("\n"), false)
+        };
 
-        let content_matched = matched_files.join("\n");
-        Ok(json!({ "files": content_matched }))
+        Ok(json!({
+            "content": truncated_files,
+            "truncated": is_truncated,
+            "metadata": {
+                "total_items": total_found,
+                "returned_items": if is_truncated { 1000 } else { total_found }
+            },
+            "next_page_hint": if is_truncated {
+                Some("More than 1000 files matched. Please use a narrower path or pattern prefix to restrict search.".to_string())
+            } else {
+                None
+            },
+
+            // Backwards compatibility
+            "files": truncated_files,
+            "total_found": total_found,
+            "message": if is_truncated { Some("Output truncated to 1000 files.") } else { None }
+        }))
     }
 
 

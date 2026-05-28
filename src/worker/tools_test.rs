@@ -90,6 +90,61 @@ mod tests {
         assert!(content.contains("commit"));
         assert!(content.contains("Author:"));
     }
+    #[test]
+    fn test_git_show_file_full() {
+        let (linux_path, _prompts_path) = get_test_paths();
+        let toolbox = ToolBox::new(linux_path, None);
+        let rt = Runtime::new().unwrap();
+
+        let args = json!({ "object": "HEAD:README.md" });
+        let result = rt.block_on(toolbox.call("git_show", args)).unwrap();
+        let content = result["content"].as_str().unwrap();
+
+        assert!(content.contains("Sashiko"));
+    }
+
+    #[test]
+    fn test_git_show_file_range() {
+        let (linux_path, _prompts_path) = get_test_paths();
+        let toolbox = ToolBox::new(linux_path, None);
+        let rt = Runtime::new().unwrap();
+
+        let args = json!({
+            "object": "HEAD:README.md",
+            "start_line": 1,
+            "end_line": 5
+        });
+        let result = rt.block_on(toolbox.call("git_show", args)).unwrap();
+        let content = result["content"].as_str().unwrap();
+        let end_line = result["end_line"].as_u64().unwrap();
+        let start_line = result["start_line"].as_u64().unwrap();
+
+        assert_eq!(start_line, 1);
+        assert_eq!(end_line, 5);
+        let lines_count = content.lines().count();
+        assert_eq!(lines_count, 5);
+    }
+
+    #[test]
+    fn test_git_show_file_default_limit() {
+        let (linux_path, _prompts_path) = get_test_paths();
+        let toolbox = ToolBox::new(linux_path, None);
+        let rt = Runtime::new().unwrap();
+
+        let args = json!({
+            "object": "HEAD:README.md",
+            "start_line": 10
+        });
+        let result = rt.block_on(toolbox.call("git_show", args)).unwrap();
+        let content = result["content"].as_str().unwrap();
+        let end_line = result["end_line"].as_u64().unwrap();
+        let start_line = result["start_line"].as_u64().unwrap();
+
+        assert_eq!(start_line, 10);
+        assert_eq!(end_line, 110);
+        let lines_count = content.lines().count();
+        assert_eq!(lines_count, 101); // 10 to 110 inclusive is 101 lines
+    }
 
     #[test]
     fn test_git_blame_readme() {
