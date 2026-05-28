@@ -1,12 +1,17 @@
 # Subsystem Guide Index
 
-Load subsystem guides from the prompt directory based on what the code touches.
-Each guide contains subsystem-specific invariants, API contracts, and common
-bug patterns. Each subsystem guide may reference additional pattern files to
-load conditionally.
+Load subsystem guides from the prompt directory based on what the code
+touches. Each guide contains subsystem-specific invariants, API
+contracts, and common bug patterns. Each subsystem guide may reference
+additional pattern files to load conditionally.
 
-The triggers column below includes both path names, function calls, and symbols
-regexes
+A change can match multiple rows. Load **every** matching guide, not
+just the deepest or most specific. For example, code touching
+`arch/arm64/kvm/hyp/` matches the ARM64, KVM, ARM64 KVM (EL1/Host),
+and ARM64 Hyp (EL2) rows — all four guides apply.
+
+The triggers column below includes both path names, function calls,
+and symbols regexes.
 
 ## Subsystem Guides
 
@@ -16,6 +21,7 @@ regexes
 | Networking Drivers | drivers/net/, ethtool_ops, net_device_ops | networking-drivers.md |
 | Netlink | `genl_`, `nla_`, `NLA_`, `NLM_F_`, `nlmsg_`, `netlink_callback`, Documentation/netlink/specs/, files marked `YNL-GEN` | netlink.md |
 | MM Page Tables | `pte_*`, `pmd_*`, `pud_*`, `set_pte`, `ptep_*`, `tlb_*`, `page_vma_mapped_walk`, `walk_page_range`, `zap_pte_range`, mm/memory.c, mm/mprotect.c, mm/pagewalk.c | mm-pagetable.md |
+| Alignment Helpers | `ALIGN`, `ALIGN_DOWN`, `IS_ALIGNED`, `PAGE_ALIGN`, `PAGE_ALIGN_DOWN`, `pageblock_align`, `pageblock_aligned`, `pageblock_start_pfn`, `pageblock_end_pfn` | alignment.md |
 | MM Folio/Page Cache | `folio_*`, `page_folio`, `compound_head`, `filemap_*`, `xa_*`, `xas_*`, `page_cache_*`, mm/filemap.c, mm/swap.c, mm/truncate.c | mm-folio.md |
 | MM Large Folios/THP/Hugetlb | `huge_memory`, `hugetlb`, `split_huge_*`, `folio_test_large`, `hstate`, PMD sharing, mm/huge_memory.c, mm/hugetlb.c, mm/memory-failure.c | mm-largepage.md |
 | MM VMA Operations | `vma_*`, `mmap_*`, `vm_area_struct`, `vm_flags`, `anon_vma`, `maple_tree`, mm/vma.c, mm/mmap.c, mm/mmap_lock.c | mm-vma.md |
@@ -64,11 +70,15 @@ regexes
 | DPLL | drivers/dpll/, dpll_, zl3073x_, ZL_REG_, ZL_INFO_ | dpll.md |
 | Kconfig | Kconfig, `config `, `select `, `depends on `, `tristate `, `bool ` | kconfig.md |
 | I3C | drivers/i3c/, i3c_master_, i3c_device_, i2c_adapter, svc-i3c-master | i3c.md |
-| Input | drivers/input/, edt-ft5x06, touchscreen@, report-rate-hz | input.md |
+| Input | drivers/input/, include/linux/input.h, include/linux/input/, input_dev, input_handler, input_register_, input_report_  | input.md |
 | Objtool | tools/objtool/, INSN_BUG, INSN_TRAP, decode.c | objtool.md |
 | KHO (Kexec Handover) | lib/test_kho.c, kho_, kho_is_enabled, kho_retrieve_subtree, kho_preserve_folio, kho_add_subtree, register_kho_notifier | kho.md |
 | I2C | drivers/i2c/, i2c_*, | i2c.md |
 | Rust | any Rust code | rust.md |
+| KVM | virt/kvm/, include/linux/kvm*, kvm_ | kvm.md |
+| ARM64 | arch/arm64/, sysreg | arm64.md |
+| ARM64 KVM (EL1/Host) | arch/arm64/kvm/ | kvm-arm64.md |
+| ARM64 Hyp (EL2) | arch/arm64/kvm/hyp/, __hyp_, arch/arm64/include/asm/kvm.*\.h, drivers/iommu/arm/arm-smmu-v3/pkvm/ | hyp-arm64.md |
 
 ## Optional Patterns
 
