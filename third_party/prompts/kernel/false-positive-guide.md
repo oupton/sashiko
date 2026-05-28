@@ -45,6 +45,18 @@ must complete task POSITIVE.1 before completing the false positive check.
   - You can prove the error is possible
   - You've confirmed the function arguments used don't prevent the error
 
+### 1.2. Mandatory API Contract Violations vs. Defensive Requests
+Do not confuse **mandatory kernel API error-handling** with "defensive programming requests."
+* If newly added code calls an allocation, initialization, locking, or resource management function (e.g., `kmalloc`, `devm_pm_runtime_enable`, `pm_runtime_get_sync`, `mutex_lock_interruptible`, `device_add_software_node`), checking and propagating its return value is an **absolute API contract requirement**.
+* Failing to check these returns is a **concrete bug**, not a defensive suggestion, and **must be reported**.
+* Do not discard ignored return values under the assumption that they are "low probability" (e.g., "memory allocation rarely fails during probe" or "PLL lock timeout is unlikely"). In the Linux kernel, all resource acquisition errors must be handled robustly.
+
+* **EXCEPTIONS to Mandatory Error Handling:**
+  1. **Early Boot / Init Code:** Handling allocation or initialization failures is not required in early boot initialization code (typically functions annotated with `__init` or executing during early architecture setup) because a failure here is catastrophic and recovery is impossible.
+  2. **Optional / Debug APIs (DebugFS):** Do not flag missing checks on opportunistic debug APIs (specifically `debugfs_create_file`, `debugfs_create_dir`, and other debugfs functions), as kernel policy explicitly discourages checking them.
+  3. **Cleanup & Teardown Paths:** During error rollback or driver removal (e.g., `remove` callbacks), checking the return values of release/disable calls (e.g., `clk_disable_unprepare`, `pm_runtime_disable`) is not required, as teardown must proceed regardless of individual release failures.
+  4. **Explicitly Documented Omissions:** Do not report ignored returns if the call is explicitly cast to `(void)` or accompanied by a code comment explaining why the omission is safe, unless you can prove their specific reasoning is factually flawed.
+
 ### 2. API Misuse Assumptions
 **Never report** issues based on theoretical API misuse unless you can prove:
   - An actual calling path exists that triggers the issue
