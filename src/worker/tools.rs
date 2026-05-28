@@ -110,8 +110,7 @@ impl ToolBox {
             },
             AiTool {
                 name: "git_show".to_string(),
-                description: "Show various types of objects (blobs, trees, tags and commits). Supports line filtering for blobs and diff suppression for commits."
-                    .to_string(),
+                description: "Show commits, trees, tags or blobs. Supports 'smart' collapsing mode for file blobs.".to_string(),
                 parameters: json!({
                         "type": "object",
                         "properties": {
@@ -123,7 +122,8 @@ impl ToolBox {
                                 "type": "array",
                                 "description": "Optional relative file or directory paths to filter the show output (only applicable to commits) (e.g. ['fs/', 'kernel/']).",
                                 "items": { "type": "string" }
-                            }
+                            },
+                            "mode": { "type": "string", "enum": ["raw", "smart"], "description": "Read mode for blobs: 'raw' (exact lines) or 'smart' (collapses code around range). Default: 'raw'." }
                         },
                         "required": ["object"]
                 }),
@@ -694,6 +694,42 @@ impl ToolBox {
         };
 
         let is_file = object.contains(':') && !object.starts_with(':');
+        let mode = args["mode"].as_str().unwrap_or("raw");
+
+        if is_file && mode == "smart" {
+            let total_lines = content.lines().count();
+            let focus = match (start_line, end_line) {
+                (Some(s), Some(e)) => Some(s..e),
+                (Some(s), None) => Some(s..s + 100),
+                (None, Some(e)) => Some(1..e),
+                (None, None) => None,
+            };
+
+            let max_tokens = if focus.is_some() { 20_000 } else { 10_000 };
+            let res = Truncator::truncate_code(&content, focus, max_tokens);
+            let truncated = res.content;
+            let is_truncated = res.truncated;
+
+            return Ok(json!({
+                "content": truncated,
+                "truncated": is_truncated,
+                "metadata": {
+                    "total_items": total_lines,
+                    "returned_items": res.lines_returned,
+                    "start_index": res.start_line,
+                    "end_index": res.end_line
+                },
+                "next_page_hint": if is_truncated {
+                    Some("Code is partially collapsed/truncated around focus lines. Supply start_line/end_line to see other parts.".to_string())
+                } else {
+                    None
+                },
+
+                // Backwards compatibility
+                "total_lines": total_lines,
+                "mode": "smart"
+            }));
+        }
 
         if start_line.is_some() || end_line.is_some() {
             let lines: Vec<&str> = content.lines().collect();
