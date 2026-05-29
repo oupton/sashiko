@@ -199,7 +199,6 @@ impl Truncator {
             truncated: true,
         }
     }
-
 }
 
 #[cfg(test)]
@@ -269,5 +268,4 @@ mod tests {
         assert!(res.content.contains("diff line 18 "));
         assert!(res.content.contains("diff line 20"));
     }
-
 }
