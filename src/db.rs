@@ -577,6 +577,23 @@ impl Database {
             .await;
 
         let _ = self.migrate_tool_usages().await;
+        let _ = self
+            .try_create_index("idx_patchsets_date", "patchsets", "date DESC")
+            .await;
+        let _ = self
+            .try_create_index(
+                "idx_reviews_patchset_status",
+                "reviews",
+                "patchset_id, status",
+            )
+            .await;
+        let _ = self
+            .try_create_index(
+                "idx_reviews_day",
+                "reviews",
+                "strftime('%Y-%m-%d', created_at, 'unixepoch'), status",
+            )
+            .await;
         Ok(())
     }
 
@@ -1200,7 +1217,14 @@ impl Database {
     }
 
     pub async fn get_tool_usage_stats(&self) -> Result<serde_json::Value> {
-        let sql = "SELECT provider, model, tool_name, count(*), avg(output_length) FROM tool_usages GROUP BY provider, model, tool_name";
+        let sql = "SELECT provider, model, tool_name, count(*), avg(output_length) \
+                   FROM ( \
+                       SELECT provider, model, tool_name, output_length \
+                       FROM tool_usages \
+                       ORDER BY id DESC \
+                       LIMIT 10000 \
+                   ) \
+                   GROUP BY provider, model, tool_name";
         let mut rows = self.conn.query(sql, ()).await?;
         let mut stats = Vec::new();
         while let Ok(Some(row)) = rows.next().await {
@@ -2297,7 +2321,12 @@ impl Database {
             "SELECT p.id, p.subject, p.status, p.thread_id, p.author, p.date, p.cover_letter_message_id, p.total_parts, p.received_parts, GROUP_CONCAT(s.name, ','),
              COALESCE(f.low, 0), COALESCE(f.medium, 0), COALESCE(f.high, 0), COALESCE(f.critical, 0), p.baseline_id, p.failed_reason, p.target_review_count, p.skip_filters, p.only_filters,
              p.embargo_until
-             FROM patchsets p
+             FROM (
+                 SELECT id FROM patchsets p
+                 {}
+                 ORDER BY p.date DESC LIMIT ? OFFSET ?
+             ) p_lim
+             JOIN patchsets p ON p_lim.id = p.id
              LEFT JOIN patchsets_subsystems ps ON p.id = ps.patchset_id
              LEFT JOIN subsystems s ON ps.subsystem_id = s.id
              LEFT JOIN (
@@ -2311,9 +2340,8 @@ impl Database {
                 WHERE r.status = 'Reviewed'
                 GROUP BY r.patchset_id
              ) f ON p.id = f.patchset_id
-             {} 
              GROUP BY p.id
-             ORDER BY p.date DESC LIMIT ? OFFSET ?",
+             ORDER BY p.date DESC",
             where_clause
         );
 

@@ -246,3 +246,8 @@ CREATE INDEX IF NOT EXISTS idx_ai_interactions_tokens ON ai_interactions(id, tok
 CREATE INDEX IF NOT EXISTS idx_reviews_grouping ON reviews(provider, model, status, interaction_id);
 CREATE INDEX IF NOT EXISTS idx_tool_usages_stats ON tool_usages(provider, model, tool_name, output_length);
 
+CREATE INDEX IF NOT EXISTS idx_patchsets_date ON patchsets(date DESC);
+CREATE INDEX IF NOT EXISTS idx_reviews_patchset_status ON reviews(patchset_id, status);
+CREATE INDEX IF NOT EXISTS idx_reviews_day ON reviews(strftime('%Y-%m-%d', created_at, 'unixepoch'), status);
+
+
